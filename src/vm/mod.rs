@@ -1,3 +1,5 @@
+mod uffd;
+
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -274,6 +276,32 @@ impl JailedVm {
             json!({
                 "snapshot_path": snapshot_path,
                 "mem_backend": { "backend_path": mem_backend_path, "backend_type": "File" },
+                "resume_vm": false,
+            }),
+        )
+    }
+
+    /// Like `snapshot_load`, but backs guest memory with an on-demand userfaultfd
+    /// handler instead of Firecracker synchronously copying the whole memory file.
+    /// Spawns a background thread (in *our* process, not the jail) that serves page
+    /// faults straight out of `mem_file_host_path`; its handshake socket is created
+    /// at `<chroot_root>/<socket_chroot_path>` so the jailed Firecracker can reach
+    /// it at `socket_chroot_path`. Unlike `snapshot_load`, the mem file never needs
+    /// to be copied into the chroot at all -- only our (unjailed) handler reads it.
+    pub fn snapshot_load_uffd(
+        &self,
+        snapshot_path: &str,
+        socket_chroot_path: &str,
+        mem_file_host_path: &Path,
+    ) -> Result<(), VmError> {
+        let socket_host_path = self.chroot_root.join(socket_chroot_path.trim_start_matches('/'));
+        uffd::spawn_handler_thread(socket_host_path, mem_file_host_path.to_path_buf());
+        put_json(
+            &self.socket_path,
+            "/snapshot/load",
+            json!({
+                "snapshot_path": snapshot_path,
+                "mem_backend": { "backend_path": socket_chroot_path, "backend_type": "Uffd" },
                 "resume_vm": false,
             }),
         )
